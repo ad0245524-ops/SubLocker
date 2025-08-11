@@ -90,3 +90,160 @@
     principal
     uint ;; total STX earned
 )
+
+
+;; public functions
+
+;; Create a new subscription
+(define-public (create-subscription (merchant principal) (amount-sats uint) (billing-interval uint))
+    (let (
+        (subscription-id (+ (var-get subscription-counter) u1))
+        (current-block block-height)
+        (next-payment (+ current-block billing-interval))
+        (user-sub-count (default-to u0 (map-get? user-subscription-count tx-sender)))
+    )
+        ;; Validation checks
+        (asserts! (not (var-get contract-paused)) ERR-CONTRACT-PAUSED)
+        (asserts! (not (is-eq tx-sender merchant)) ERR-SELF-SUBSCRIPTION)
+        (asserts! (and (>= amount-sats MIN-SUBSCRIPTION-AMOUNT) 
+                      (<= amount-sats MAX-SUBSCRIPTION-AMOUNT)) ERR-INVALID-AMOUNT)
+        (asserts! (>= billing-interval MIN-BILLING-INTERVAL) ERR-INVALID-INTERVAL)
+        (asserts! (< user-sub-count MAX-SUBSCRIPTIONS-PER-USER) ERR-UNAUTHORIZED)
+        
+        ;; Create the subscription
+        (map-set subscriptions subscription-id
+            {
+                subscriber: tx-sender,
+                merchant: merchant,
+                amount-sats: amount-sats,
+                billing-interval: billing-interval,
+                is-active: true,
+                created-at: current-block,
+                last-payment: u0,
+                next-payment-due: next-payment,
+                total-payments: u0
+            }
+        )
+        
+        ;; Update user subscription tracking
+        (map-set user-subscriptions 
+            {user: tx-sender, index: user-sub-count} 
+            subscription-id)
+        (map-set user-subscription-count tx-sender (+ user-sub-count u1))
+        
+        ;; Update global counter
+        (var-set subscription-counter subscription-id)
+        
+        (ok subscription-id)
+    )
+)
+
+;; Process payment for a subscription
+(define-public (process-subscription-payment (subscription-id uint))
+    (let (
+        (subscription (unwrap! (map-get? subscriptions subscription-id) ERR-NOT-FOUND))
+        (current-block block-height)
+        (btc-rate (var-get btc-to-stx-rate))
+        (amount-sats (get amount-sats subscription))
+        (amount-stx (calculate-stx-from-sats amount-sats btc-rate))
+        (platform-fee (/ (* amount-stx PLATFORM-FEE-BPS) BASIS-POINTS))
+        (merchant-amount (- amount-stx platform-fee))
+        (payment-id (+ (get total-payments subscription) u1))
+        (subscriber (get subscriber subscription))
+        (merchant (get merchant subscription))
+    )
+        ;; Validation checks
+        (asserts! (not (var-get contract-paused)) ERR-CONTRACT-PAUSED)
+        (asserts! (get is-active subscription) ERR-SUBSCRIPTION-INACTIVE)
+        (asserts! (>= current-block (get next-payment-due subscription)) ERR-PAYMENT-NOT-DUE)
+        (asserts! (>= (stx-get-balance subscriber) amount-stx) ERR-INSUFFICIENT-BALANCE)
+        
+        ;; Process payments
+        (try! (stx-transfer? merchant-amount subscriber merchant))
+        (try! (stx-transfer? platform-fee subscriber (var-get platform-fee-recipient)))
+        
+        ;; Record the payment
+        (map-set payments
+            {subscription-id: subscription-id, payment-id: payment-id}
+            {
+                amount-sats: amount-sats,
+                amount-stx: amount-stx,
+                btc-stx-rate: btc-rate,
+                platform-fee: platform-fee,
+                block-height: current-block,
+                timestamp: (unwrap-panic (get-block-info? time current-block))
+            }
+        )
+        
+        ;; Update subscription
+        (map-set subscriptions subscription-id
+            (merge subscription 
+                {
+                    last-payment: current-block,
+                    next-payment-due: (+ current-block (get billing-interval subscription)),
+                    total-payments: payment-id
+                }
+            )
+        )
+        
+        ;; Update merchant earnings
+        (map-set merchant-earnings merchant
+            (+ (default-to u0 (map-get? merchant-earnings merchant)) merchant-amount))
+        
+        (ok {
+            payment-id: payment-id,
+            amount-stx: amount-stx,
+            platform-fee: platform-fee,
+            next-payment-due: (+ current-block (get billing-interval subscription))
+        })
+    )
+)
+
+;; Cancel a subscription
+(define-public (cancel-subscription (subscription-id uint))
+    (let (
+        (subscription (unwrap! (map-get? subscriptions subscription-id) ERR-NOT-FOUND))
+    )
+        (asserts! (not (var-get contract-paused)) ERR-CONTRACT-PAUSED)
+        (asserts! (is-eq tx-sender (get subscriber subscription)) ERR-UNAUTHORIZED)
+        (asserts! (get is-active subscription) ERR-SUBSCRIPTION-INACTIVE)
+        
+        ;; Deactivate subscription
+        (map-set subscriptions subscription-id
+            (merge subscription {is-active: false})
+        )
+        
+        (ok true)
+    )
+)
+
+;; Update BTC to STX exchange rate (owner only)
+(define-public (update-btc-stx-rate (new-rate uint))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+        (asserts! (> new-rate u0) ERR-INVALID-AMOUNT)
+        
+        (var-set btc-to-stx-rate new-rate)
+        (var-set last-rate-update block-height)
+        
+        (ok true)
+    )
+)
+
+;; Update platform fee recipient (owner only)
+(define-public (set-platform-fee-recipient (new-recipient principal))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+        (var-set platform-fee-recipient new-recipient)
+        (ok true)
+    )
+)
+
+;; Emergency pause/unpause contract (owner only)
+(define-public (toggle-contract-pause)
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+        (var-set contract-paused (not (var-get contract-paused)))
+        (ok (var-get contract-paused))
+    )
+)
