@@ -98,7 +98,7 @@
 (define-public (create-subscription (merchant principal) (amount-sats uint) (billing-interval uint))
     (let (
         (subscription-id (+ (var-get subscription-counter) u1))
-        (current-block block-height)
+        (current-block stacks-block-height)
         (next-payment (+ current-block billing-interval))
         (user-sub-count (default-to u0 (map-get? user-subscription-count tx-sender)))
     )
@@ -142,7 +142,7 @@
 (define-public (process-subscription-payment (subscription-id uint))
     (let (
         (subscription (unwrap! (map-get? subscriptions subscription-id) ERR-NOT-FOUND))
-        (current-block block-height)
+        (current-block stacks-block-height)
         (btc-rate (var-get btc-to-stx-rate))
         (amount-sats (get amount-sats subscription))
         (amount-stx (calculate-stx-from-sats amount-sats btc-rate))
@@ -171,7 +171,7 @@
                 btc-stx-rate: btc-rate,
                 platform-fee: platform-fee,
                 block-height: current-block,
-                timestamp: (unwrap-panic (get-block-info? time current-block))
+                timestamp: current-block
             }
         )
         
@@ -224,7 +224,7 @@
         (asserts! (> new-rate u0) ERR-INVALID-AMOUNT)
         
         (var-set btc-to-stx-rate new-rate)
-        (var-set last-rate-update block-height)
+        (var-set last-rate-update stacks-block-height)
         
         (ok true)
     )
@@ -306,7 +306,7 @@
         subscription
         (and 
             (get is-active subscription)
-            (>= block-height (get next-payment-due subscription))
+            (>= stacks-block-height (get next-payment-due subscription))
         )
         false
     )
@@ -333,4 +333,12 @@
         max-subscriptions-per-user: MAX-SUBSCRIPTIONS-PER-USER,
         platform-fee-bps: PLATFORM-FEE-BPS
     }
+)
+
+
+;; private functions
+
+;; Calculate STX amount from satoshis using given rate
+(define-private (calculate-stx-from-sats (sats uint) (rate uint))
+    (/ (* sats rate) (* SATOSHIS-PER-BTC u1000000))
 )
