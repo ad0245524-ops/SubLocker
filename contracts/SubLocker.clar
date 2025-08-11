@@ -98,7 +98,7 @@
 (define-public (create-subscription (merchant principal) (amount-sats uint) (billing-interval uint))
     (let (
         (subscription-id (+ (var-get subscription-counter) u1))
-        (current-block block-height)
+        (current-block stacks-block-height)
         (next-payment (+ current-block billing-interval))
         (user-sub-count (default-to u0 (map-get? user-subscription-count tx-sender)))
     )
@@ -142,7 +142,7 @@
 (define-public (process-subscription-payment (subscription-id uint))
     (let (
         (subscription (unwrap! (map-get? subscriptions subscription-id) ERR-NOT-FOUND))
-        (current-block block-height)
+        (current-block stacks-block-height)
         (btc-rate (var-get btc-to-stx-rate))
         (amount-sats (get amount-sats subscription))
         (amount-stx (calculate-stx-from-sats amount-sats btc-rate))
@@ -171,7 +171,7 @@
                 btc-stx-rate: btc-rate,
                 platform-fee: platform-fee,
                 block-height: current-block,
-                timestamp: (unwrap-panic (get-block-info? time current-block))
+                timestamp: current-block
             }
         )
         
@@ -224,7 +224,7 @@
         (asserts! (> new-rate u0) ERR-INVALID-AMOUNT)
         
         (var-set btc-to-stx-rate new-rate)
-        (var-set last-rate-update block-height)
+        (var-set last-rate-update stacks-block-height)
         
         (ok true)
     )
@@ -246,4 +246,99 @@
         (var-set contract-paused (not (var-get contract-paused)))
         (ok (var-get contract-paused))
     )
+)
+
+;; read only functions
+
+;; Get subscription details
+(define-read-only (get-subscription (subscription-id uint))
+    (map-get? subscriptions subscription-id)
+)
+
+;; Get payment details
+(define-read-only (get-payment (subscription-id uint) (payment-id uint))
+    (map-get? payments {subscription-id: subscription-id, payment-id: payment-id})
+)
+
+;; Get user's subscription count
+(define-read-only (get-user-subscription-count (user principal))
+    (default-to u0 (map-get? user-subscription-count user))
+)
+
+;; Get user's subscription by index
+(define-read-only (get-user-subscription-by-index (user principal) (index uint))
+    (map-get? user-subscriptions {user: user, index: index})
+)
+
+;; Get merchant total earnings
+(define-read-only (get-merchant-earnings (merchant principal))
+    (default-to u0 (map-get? merchant-earnings merchant))
+)
+
+;; Get current BTC to STX rate
+(define-read-only (get-current-btc-rate)
+    (var-get btc-to-stx-rate)
+)
+
+;; Calculate STX amount from satoshis
+(define-read-only (calculate-stx-amount (amount-sats uint))
+    (calculate-stx-from-sats amount-sats (var-get btc-to-stx-rate))
+)
+
+;; Calculate total payment amount including platform fee
+(define-read-only (calculate-payment-breakdown (amount-sats uint))
+    (let (
+        (amount-stx (calculate-stx-from-sats amount-sats (var-get btc-to-stx-rate)))
+        (platform-fee (/ (* amount-stx PLATFORM-FEE-BPS) BASIS-POINTS))
+        (merchant-amount (- amount-stx platform-fee))
+    )
+        {
+            total-stx: amount-stx,
+            merchant-amount: merchant-amount,
+            platform-fee: platform-fee
+        }
+    )
+)
+
+;; Check if subscription payment is due
+(define-read-only (is-payment-due (subscription-id uint))
+    (match (map-get? subscriptions subscription-id)
+        subscription
+        (and 
+            (get is-active subscription)
+            (>= stacks-block-height (get next-payment-due subscription))
+        )
+        false
+    )
+)
+
+;; Get contract statistics
+(define-read-only (get-contract-stats)
+    {
+        total-subscriptions: (var-get subscription-counter),
+        btc-stx-rate: (var-get btc-to-stx-rate),
+        platform-fee-bps: PLATFORM-FEE-BPS,
+        contract-paused: (var-get contract-paused),
+        last-rate-update: (var-get last-rate-update),
+        platform-fee-recipient: (var-get platform-fee-recipient)
+    }
+)
+
+;; Get subscription limits and constraints
+(define-read-only (get-subscription-limits)
+    {
+        min-amount-sats: MIN-SUBSCRIPTION-AMOUNT,
+        max-amount-sats: MAX-SUBSCRIPTION-AMOUNT,
+        min-billing-interval: MIN-BILLING-INTERVAL,
+        max-subscriptions-per-user: MAX-SUBSCRIPTIONS-PER-USER,
+        platform-fee-bps: PLATFORM-FEE-BPS
+    }
+)
+
+
+;; private functions
+
+;; Calculate STX amount from satoshis using given rate
+(define-private (calculate-stx-from-sats (sats uint) (rate uint))
+    (/ (* sats rate) (* SATOSHIS-PER-BTC u1000000))
 )
